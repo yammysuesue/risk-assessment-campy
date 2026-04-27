@@ -7,6 +7,9 @@ _sizes.txt
 # RStudio / Posit IDE (machine-specific)
 **/.Rproj.user/
 
+# Microsoft Office lock files
+~$*
+
 # Duplicate archive (folder EXCAM-main is the source of truth)
 EXCAM-main.zip
 
