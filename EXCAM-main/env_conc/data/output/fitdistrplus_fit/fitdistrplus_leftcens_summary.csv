@@ -1,0 +1,5 @@
+"source","source_label","dataset_name","n","n_observed","n_censored","mean_est","sd_est"
+"EB","bathing water","df_all",43,29,14,3.6668704668674,1.34363744408589
+"HH","sibling handrinse","df_all",124,56,68,3.04193496876063,1.25036968571496
+"ED","drinking water","df_via",148,72,76,3.12338281226097,1.18925614634217
+"ES","soil","df_via",148,100,48,3.97966640945105,0.856615383247253

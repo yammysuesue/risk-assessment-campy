@@ -1,0 +1,19 @@
+# Local / OS
+.DS_Store
+Thumbs.db
+*.tmp
+_sizes.txt
+
+# RStudio / Posit IDE (machine-specific)
+**/.Rproj.user/
+
+# Duplicate archive (folder EXCAM-main is the source of truth)
+EXCAM-main.zip
+
+# R session dumps (often huge; not portable)
+**/.Rhistory
+**/.RData
+
+# Serialized outputs over GitHub's ~100MB single-file limit — regenerate from code or keep locally
+EXCAM-main/expo/experiment_0404.RData
+EXCAM-main/env_conc/data/output/env.paras_bvn_ll_all.rda

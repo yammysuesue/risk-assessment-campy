@@ -1,0 +1,532 @@
+\documentclass[12pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools,bm,bbm,amsfonts}
+\usepackage{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{cleveref}
+\usepackage{xcolor}
+\usepackage{dsfont}
+\usepackage{indentfirst}
+\usepackage{booktabs}
+\usepackage{threeparttable}
+\usepackage{caption}
+\usepackage{multirow}
+
+\title{BVN Realizations}
+\author{Yixuan Zeng}
+\date{\today}
+
+\setlength{\parindent}{2em}
+\begin{document}
+\maketitle
+
+
+
+\section{Latent-augmentation formulation for a bivariate normal model with left censoring}
+
+\subsection{Notation and model setup}
+
+Suppose we observe \(N\) samples indexed by \(i=1,\dots,N\), arising from \(S\) sources indexed by \(s=1,\dots,S\).
+For each sample \(i\), let \(s_i \in \{1,\dots,S\}\) denote its source membership.
+
+For sample \(i\), define the latent true log-scale bivariate outcome
+\[
+\mathbf{Y}_i
+=
+\begin{pmatrix}
+Y_{i1}\\
+Y_{i2}
+\end{pmatrix},
+\]
+where:
+\begin{itemize}
+    \item \(Y_{i1}\) is the latent true value for the \texttt{tot} measurement,
+    \item \(Y_{i2}\) is the latent true value for the \texttt{via} measurement.
+\end{itemize}
+
+We assume the source-specific bivariate normal model
+\[
+\mathbf{Y}_i \mid s_i
+\sim
+\mathcal{N}_2(\boldsymbol{\mu}_{s_i}, \Sigma),
+\]
+with source-specific mean vector
+\[
+\boldsymbol{\mu}_{s}
+=
+\begin{pmatrix}
+\mu_{1s}\\
+\mu_{2s}
+\end{pmatrix},
+\qquad s=1,\dots,S,
+\]
+and common covariance matrix
+\[
+\Sigma
+=
+\begin{pmatrix}
+\sigma_1^2 & \rho \sigma_1 \sigma_2\\
+\rho \sigma_1 \sigma_2 & \sigma_2^2
+\end{pmatrix},
+\]
+where \(\sigma_1>0\), \(\sigma_2>0\), and \(-1<\rho<1\).
+
+For each component \(j\in\{1,2\}\), let \(L_{ij}\) denote the corresponding log-scale limit of detection (LOD).  
+Define censoring indicators
+\[
+C_{ij}
+=
+\begin{cases}
+1, & \text{if } Y_{ij} \text{ is left-censored, i.e. } Y_{ij}<L_{ij},\\
+0, & \text{if } Y_{ij} \text{ is observed exactly.}
+\end{cases}
+\]
+
+Thus, the observed data for row \(i\) consist of:
+\begin{itemize}
+    \item the source label \(s_i\),
+    \item any observed component values,
+    \item the censoring indicators \((C_{i1},C_{i2})\),
+    \item the LOD vector \((L_{i1},L_{i2})\).
+\end{itemize}
+
+\subsection{Joint Sampling in STAN}
+
+Stan employs HMC/NUTs sampling. This means we sample from the joint posterior distribution of a vector consisting of all our targeted parameters and latent values. Specifically, 
+\begin{enumerate}
+    \item the source-specific mean parameters
+    \[
+    \{\boldsymbol{\mu}_s: s=1,\dots,S\},
+    \]
+    \item the shared covariance parameters
+    \[
+    (\sigma_1,\sigma_2,\rho),
+    \]
+    \item all latent values corresponding to censored measurements
+    \[
+    \{Y_{ij}:C_{ij}=1\}.
+    \]
+    For this part, later we'll do variable transformation to apply the constraint $Y_{ij}<LOD_{ij}$.
+\end{enumerate}
+
+
+In other words, censoring is handled by treating each censored component as an unknown latent quantity, and inference is performed jointly over:
+\[
+\{\boldsymbol{\mu}_s\}_{s=1}^S,\quad \sigma_1,\quad \sigma_2,\quad \rho,\quad
+\{Y_{ij}: C_{ij}=1\}.
+\]
+
+The sampler explores the full joint posterior
+\[
+p\!\left(
+\{\boldsymbol{\mu}_s\}_{s=1}^S,\sigma_1,\sigma_2,\rho,\{Y_{ij}:C_{ij}=1\}
+\;\middle|\;
+\text{observed data}
+\right),
+\]
+so that uncertainty in the censored values and uncertainty in the model parameters are propagated simultaneously.
+
+
+\subsection{Joint posterior under different censoring situation}
+
+Let \(\Theta\) denote parameters,
+\[
+\Theta
+=
+\left(
+\{\boldsymbol{\mu}_s\}_{s=1}^S,\sigma_1,\sigma_2,\rho
+\right).
+\]
+
+
+Then the augmented posterior is
+\[
+p\!\left(
+\Theta, , \{Y_{ij}: C_{ij}=1\}
+\;\middle|\;
+\text{observed data}
+\right)
+\propto
+p(\Theta)\,
+\prod_{i=1}^N
+f_2(\mathbf{Y}_i\mid \boldsymbol{\mu}_{s_i},\Sigma)
+\cdot
+\mathbf{1}\{\mathbf{Y}_i \text{ satisfies the censoring constraints}\},
+\]
+where \(f_2(\cdot\mid \boldsymbol{\mu},\Sigma)\) is the bivariate normal density and the indicator function enforces the relevant inequalities \(Y_{ij}<L_{ij}\) for censored components.\\
+
+
+Now we consider 4 kinds of censoring pattern.
+
+First of all, for each row \(i\), define
+\[
+\boldsymbol{\mu}_{s_i}
+=
+\begin{pmatrix}
+\mu_{1,s_i}\\
+\mu_{2,s_i}
+\end{pmatrix}.
+\]
+
+
+\subsubsection*{Case 1: neither component is censored \((C_{i1}=0,\; C_{i2}=0)\)}
+
+In this case both components are observed:
+\[
+Y_{i1}=y_{i1}^{\mathrm{obs}},\qquad
+Y_{i2}=y_{i2}^{\mathrm{obs}}.
+\]
+
+The row-specific contribution to the log posterior is
+\[
+\log f_2
+\left(
+\begin{pmatrix}
+y_{i1}^{\mathrm{obs}}\\
+y_{i2}^{\mathrm{obs}}
+\end{pmatrix}
+\;\middle|\;
+\boldsymbol{\mu}_{s_i},\Sigma
+\right).
+\]
+
+
+\subsubsection*{Prepration for cencoring case}
+For each censored component \(Y_{ij}\), we introduce an unconstrained auxiliary variable \(Z_{ij}\in\mathbb{R}\) and define
+\[
+Y_{ij}=L_{ij}-\exp(Z_{ij}).
+\]
+
+Since \(\exp(Z_{ij})>0\), this automatically ensures
+\[
+Y_{ij}<L_{ij},
+\]
+so the censoring constraint is satisfied by construction.
+
+In this way, the sampler can operate on unconstrained variables instead of constrained $Y_{ij}$ while still respecting the left-censoring condition.
+
+After introducing unconstrained variables for censored entries, the posterior must be expressed in the \(Z\)-parameterization.
+Let \(\mathcal{C}\) denote the set of censored components:
+\[
+\mathcal{C}=\{(i,j): C_{ij}=1\}.
+\]
+Then the transformed posterior density is
+\[
+p\!\left(
+\Theta,\{Z_{ij}:(i,j)\in\mathcal{C} \}
+\;\middle|\;
+\text{observed data}
+\right)
+\propto
+p(\Theta)\,
+\prod_{i=1}^N
+f_2(\mathbf{Y}_i(\mathbf{Z}_i)\mid \boldsymbol{\mu}_{s_i},\Sigma)
+\cdot
+|J(\mathbf{Z})|,
+\]
+where:
+\begin{itemize}
+    \item \(\mathbf{Y}_i(\mathbf{Z}_i)\) denotes the completed row after replacing censored components by \(L_{ij}-\exp(Z_{ij})\),
+    \item \(J(\mathbf{Z})\) is the Jacobian determinant of the transformation from unconstrained variables to censored latent values.
+\end{itemize}
+
+Therefore the full log posterior is
+\[
+\log p\!\left(
+\Theta, \{Z_{ij}:(i,j)\in\mathcal{C} \}
+\;\middle|\;
+\text{observed data}
+\right)
+\propto
+\log p(\Theta)
++
+\sum_{i=1}^N
+\log f_2(\mathbf{Y}_i(\mathbf{U}_i)\mid \boldsymbol{\mu}_{s_i},\Sigma)
++
+\log |J(\mathbf{U})|.
+\]
+
+Here, \(\log p(\Theta)\) is the log prior contribution, the second term is the log likelihood contribution from the completed data, and the Jacobian term corrects for the change of variables from censored latent values to unconstrained auxiliary variables.
+
+
+For one censored component \(Y_{ij}\), written as
+\[
+Y_{ij}=L_{ij}-\exp(Z_{ij}).
+\]
+Its derivative with respect to \(Z_{ij}\) is
+\[
+\frac{dY_{ij}}{dZ_{ij}}=-\exp(Z_{ij}),
+\]
+so the absolute Jacobian is
+\[
+\left|\frac{dY_{ij}}{dZ_{ij}}\right|
+=
+\exp(Z_{ij}).
+\]
+Taking logarithms gives
+\[
+\log \left|\frac{dY_{ij}}{dZ_{ij}}\right|
+=
+Z_{ij}.
+\]
+
+Because the transformation is componentwise, the full Jacobian matrix is diagonal over all censored entries, and thus
+\[
+\log |J(\mathbf{Z})|
+=
+\sum_{(i,j)\in\mathcal{C}} Z_{ij}.
+\]
+
+Hence the log posterior can be written explicitly as
+\[
+\log p\!\left(
+\Theta,\{Z_{ij}\}_{(i,j)\in\mathcal{C}}
+\;\middle|\;
+\text{observed data}
+\right)
+\propto
+\log p(\Theta)
++
+\sum_{i=1}^N
+\log f_2(\mathbf{Y}_i(\mathbf{Z}_i)\mid \boldsymbol{\mu}_{s_i},\Sigma)
++
+\sum_{(i,j)\in\mathcal{C}} Z_{ij}.
+\]
+
+
+\subsubsection*{Case 2: first component censored, second observed \((C_{i1}=1,\; C_{i2}=0)\)}
+Introduce one unconstrained auxiliary variable \(U_{i1}\), and define
+\[
+Y_{i1}=L_{i1}-\exp(Z_{i1}),\qquad
+Y_{i2}=y_{i2}^{\mathrm{obs}}.
+\]
+
+Then the row-specific contribution to the log posterior is
+\[
+\log f_2
+\left(
+\begin{pmatrix}
+L_{i1}-\exp(Z_{i1})\\
+y_{i2}^{\mathrm{obs}}
+\end{pmatrix}
+\;\middle|\;
+\boldsymbol{\mu}_{s_i},\Sigma
+\right)
++
+Z_{i1}.
+\]
+
+Equivalently, this row contributes:
+\begin{itemize}
+    \item one bivariate normal log-density term evaluated at the completed row,
+    \item one log-Jacobian term \(Z_{i1}\).
+\end{itemize}
+
+\subsubsection*{Case 3: first component observed, second censored \((C_{i1}=0,\; C_{i2}=1)\)}
+
+Introduce one unconstrained auxiliary variable \(U_{i2}\), and define
+\[
+Y_{i1}=y_{i1}^{\mathrm{obs}},\qquad
+Y_{i2}=L_{i2}-\exp(Z_{i2}).
+\]
+Then the row-specific contribution to the log posterior is
+\[
+\log f_2
+\left(
+\begin{pmatrix}
+y_{i1}^{\mathrm{obs}}\\
+L_{i2}-\exp(Z_{i2})
+\end{pmatrix}
+\;\middle|\;
+\boldsymbol{\mu}_{s_i},\Sigma
+\right)
++
+Z_{i2}.
+\]
+
+
+
+\subsubsection*{Case 4: both components censored \((C_{i1}=1,\; C_{i2}=1)\)}
+
+Introduce two unconstrained auxiliary variables \(Z_{i1}\) and \(Z_{i2}\), and define
+\[
+Y_{i1}=L_{i1}-\exp(Z_{i1}),\qquad
+Y_{i2}=L_{i2}-\exp(Z_{i2}).
+\]
+Then the row-specific contribution to the log posterior is
+\[
+\log f_2
+\left(
+\begin{pmatrix}
+L_{i1}-\exp(Z_{i1})\\
+L_{i2}-\exp(Z_{i2})
+\end{pmatrix}
+\;\middle|\;
+\boldsymbol{\mu}_{s_i},\Sigma
+\right)
++
+U_{i1}+U_{i2}.
+\]
+
+Because both transformed components appear together inside the same bivariate normal log density, the two auxiliary variables \(Z_{i1}\) and \(Z_{i2}\) are generally notindependent in the posterior.  
+Their posterior dependence is induced by the covariance matrix \(\Sigma\), in particular by the correlation parameter \(\rho\).
+
+
+
+\section{Log-likelihood realization}
+
+According to the notation setting, the observed data for sample \(i\) consist of the pair \((\tilde Y_{i1},\tilde Y_{i2})\) together with the censoring pattern \((C_{i1},C_{i2})\), where \(\tilde Y_{ij}=Y_{ij}\) if \(C_{ij}=0\), and \(\tilde Y_{ij}\) is unobserved if \(C_{ij}=1\).
+
+Let \(f_s(y_1,y_2)\) denote the bivariate normal density under source \(s\), and let \(\phi(\cdot;\mu,\sigma^2)\) and \(\Phi(\cdot)\) denote the univariate normal density and standard normal cumulative distribution function, respectively. The sample-specific likelihood contribution depends on the censoring pattern.
+
+\subsection*{Case 1: neither component is censored \((C_{i1}=0,\; C_{i2}=0)\)}
+
+If \(C_{i1}=0\) and \(C_{i2}=0\), then both latent components are observed exactly, and the likelihood contribution is simply the bivariate normal density
+\[
+\mathcal L_i
+=
+f_2(\tilde Y_{i1},\tilde Y_{i2}).
+\]
+
+\subsection*{Case 2: first component censored, second observed \((C_{i1}=1,\; C_{i2}=0)\)}
+
+If \(C_{i1}=1\) and \(C_{i2}=0\), then we observe \(Y_{i2}=\tilde Y_{i2}\) and only know that \(Y_{i1}<L_{i1}\). Therefore,
+\[
+\mathcal L_i
+=
+\int_{-\infty}^{L_{i1}}
+f_2(y_1,\tilde Y_{i2})\,dy_1.
+\]
+Using the conditional normal distribution,
+\[
+Y_{i1}\mid (Y_{i2}=\tilde Y_{i2}, s_i)
+\sim
+\mathcal N\!\left(
+\mu_{1\mid 2,i},\,
+\sigma_{1\mid 2}^2
+\right),
+\]
+where
+\[
+\mu_{1\mid 2,i}
+=
+\mu_{1s_i}
++
+\rho\frac{\sigma_1}{\sigma_2}(\tilde Y_{i2}-\mu_{2s_i}),
+\qquad
+\sigma_{1\mid 2}^2
+=
+\sigma_1^2(1-\rho^2),
+\]
+we obtain
+\[
+\mathcal L_i
+=
+\phi(\tilde Y_{i2};\mu_{2s_i},\sigma_2^2)\,
+\Phi\!\left(
+\frac{L_{i1}-\mu_{1\mid 2,i}}{\sigma_{1\mid 2}}
+\right).
+\]
+
+\subsection*{Case 3: first component observed, second censored \((C_{i1}=0,\; C_{i2}=1)\)}
+
+If \(C_{i1}=0\) and \(C_{i2}=1\), then we observe \(Y_{i1}=\tilde Y_{i1}\) and only know that \(Y_{i2}<L_{i2}\). Thus,
+\[
+\mathcal L_i
+=
+\int_{-\infty}^{L_{i2}}
+f_2(\tilde Y_{i1},y_2)\,dy_2.
+\]
+Similarly,
+\[
+Y_{i2}\mid (Y_{i1}=\tilde Y_{i1}, s_i)
+\sim
+\mathcal N\!\left(
+\mu_{2\mid 1,i},\,
+\sigma_{2\mid 1}^2
+\right),
+\]
+where
+\[
+\mu_{2\mid 1,i}
+=
+\mu_{2s_i}
++
+\rho\frac{\sigma_2}{\sigma_1}(\tilde Y_{i1}-\mu_{1s_i}),
+\qquad
+\sigma_{2\mid 1}^2
+=
+\sigma_2^2(1-\rho^2),
+\]
+so that
+\[
+\mathcal L_i
+=
+\phi(\tilde Y_{i1};\mu_{1s_i},\sigma_1^2)\,
+\Phi\!\left(
+\frac{L_{i2}-\mu_{2\mid 1,i}}{\sigma_{2\mid 1}}
+\right).
+\]
+
+\subsection*{Case 4: both components censored \((C_{i1}=1,\; C_{i2}=1)\)}
+
+If \(C_{i1}=1\) and \(C_{i2}=1\), then we only know that
+\[
+Y_{i1}<L_{i1},
+\qquad
+Y_{i2}<L_{i2}.
+\]
+The likelihood contribution is the lower-left rectangular probability under the source-specific bivariate normal distribution,
+\[
+\mathcal L_i
+=
+\int_{-\infty}^{L_{i1}}
+\int_{-\infty}^{L_{i2}}
+f_{s_i}(y_1,y_2)\,dy_2\,dy_1.
+\]
+Because Stan does not provide a built-in bivariate normal CDF, we realize this term by rewriting the above two-dimensional probability as a one-dimensional integral using conditional normality:
+\[
+\mathcal L_i
+=
+\int_{-\infty}^{L_{i2}}
+\phi(y_2;\mu_{2s_i},\sigma_2^2)\,
+\Phi\!\left(
+\frac{
+L_{i1}-\mu_{1s_i}-\rho\frac{\sigma_1}{\sigma_2}(y_2-\mu_{2s_i})
+}{
+\sigma_1\sqrt{1-\rho^2}
+}
+\right)\,dy_2.
+\]
+Equivalently, after standardizing
+\[
+a_i=\frac{L_{i1}-\mu_{1s_i}}{\sigma_1},
+\qquad
+b_i=\frac{L_{i2}-\mu_{2s_i}}{\sigma_2},
+\]
+and setting \(z=(y_2-\mu_{2s_i})/\sigma_2\), we obtain
+\[
+\mathcal L_i
+=
+\int_{-\infty}^{b_i}
+\phi(z;0,1)\,
+\Phi\!\left(
+\frac{a_i-\rho z}{\sqrt{1-\rho^2}}
+\right)\,dz.
+\]
+This representation is especially convenient for computation in Stan, because it reduces the doubly censored contribution to a smooth one-dimensional integral that can be evaluated by \texttt{integrate\_1d}. Hence, among the four censoring patterns, only the doubly censored case requires numerical integration; the other three can be written in closed form using normal densities and normal cumulative distribution functions.
+
+\subsection*{Full log-likelihood}
+
+Assuming conditional independence across samples given the model parameters, the full log-likelihood is
+\[
+\ell(\{\mu_s\}_{s=1}^S,\sigma_1,\sigma_2,\rho)
+=
+\sum_{i=1}^N \log \mathcal L_i,
+\]
+where \(\mathcal L_i\) is selected according to the censoring pattern \((C_{i1},C_{i2})\) for sample \(i\). In implementation, the contributions from the first three cases are accumulated analytically, while the fourth case is evaluated numerically through the one-dimensional integral above.
+\end{document}

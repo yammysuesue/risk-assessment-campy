@@ -1,0 +1,358 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+\title{Pathway Exposure Calculation Methods for Environmental Sources in the EXCAM Project}
+\author{Prepared by Codex}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose and Scope}
+This document summarizes all \texttt{.R}/\texttt{.r} files in the project that are directly relevant to environmental-source exposure calculations, and traces how each source enters the final exposure outputs. The main files are:
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{expo/v1/v1.func.R}: the core file that defines the state-by-state exposure formulas.
+  \item \texttt{expo/v1/v1.func2.R}: the timepoint-2 wrapper; it changes behavior-frequency generation and the starting compartment, but does not change the source-to-pathway dose formulas.
+  \item \texttt{behav/simul/v1/v1.simul.r}: defines \texttt{gen.behav()}, which is called from \texttt{v1.func.R} but not defined there.
+  \item \texttt{expo/v1/v1.data1.R} and \texttt{expo/v1/v1.data2.R}: prepare the behavior state space, transition-rate objects, and environmental parameter objects.
+  \item \texttt{expo/v1/v1.main.R} and \texttt{expo/v1/v1.main2.R}: convert environmental posterior samples into \texttt{conc}, which is the object consumed by the exposure formulas.
+  \item \texttt{expo/v1/v1.plot.R} and \texttt{expo/v1/v1.netgraph.R}: aggregate state-level exposure into pathway totals and network visualizations; they do not define new dose formulas.
+  \item \texttt{env\_conc/code/env\_data.R}: defines raw sample concentration back-calculations and units; it does not directly implement exposure transfer, but it determines the physical units of \texttt{conc}.
+\end{itemize}
+
+The main conclusion is straightforward: nearly all actual source-to-mouth dose calculations are concentrated in \texttt{expo/v1/v1.func.R}, especially \texttt{expos.by.state()} and its helper functions. \texttt{v1.func2.R} does not redefine those source-pathway dose formulas.
+
+\section{Overall Computational Pipeline}
+\subsection{How the behavior-state sequence is generated}
+\begin{enumerate}[leftmargin=2em]
+  \item In \texttt{behav/simul/v1/v1.simul.r}, \texttt{gen.behav()} samples the waiting time to the next state transition from \texttt{lambda.mc}, and returns a new compartment, a new behavior, and a duration.
+  \item In \texttt{expo/v1/v1.func.R}, \texttt{gen.period.seq()} repeatedly calls \texttt{gen.behav()} to generate a sequence of states over a fixed total duration.
+  \item In \texttt{expo/v1/v1.func.R}, \texttt{gen.freq.seq()} generates higher-frequency events within each duration block using \texttt{rate\_table}, including touching, mouthing, eating, and pica events.
+  \item In \texttt{expo/v1/v1.func.R}, \texttt{gen.beh.seq()} combines state transitions and high-frequency events into a single time-ordered behavior sequence.
+  \item In \texttt{expo/v1/v1.func.R} and \texttt{expo/v1/v1.func2.R}, \texttt{exp.by.cat()} steps through that behavior sequence and repeatedly calls \texttt{expos.by.state()} to compute hand contamination and ingestion at each event.
+\end{enumerate}
+
+\subsection{How environmental concentration samples enter the model}
+In \texttt{expo/v1/v1.main.R} and \texttt{expo/v1/v1.main2.R}, posterior environmental parameters are converted into \texttt{conc}. The core form is
+\[
+\texttt{conc[, i]} = 10^{Z_i}, \qquad Z_i \sim \mathcal{N}(\mu_i, \sigma_i).
+\]
+In other words, the code samples on the log scale and transforms the values back to the original concentration scale. The columns of \texttt{conc} are then named using the following source map:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Code & Column name in \texttt{conc} \\
+\midrule
+EB & bathing water \\
+ED & drinking water \\
+EF & food \\
+ES & soil \\
+EV & fomite \\
+HA & areola swab \\
+HB & breastmilk \\
+HH & sibling handrinse \\
+HP & mother handrinse \\
+HR & infant handrinse \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Important practical note}
+\texttt{exp.by.cat()} does not care whether the posterior samples came from a UVN or BVN model. It only needs a data frame named \texttt{conc}. So the source-pathway formulas themselves are fixed; what changes is the concentration sample fed into those formulas.
+
+\subsection{Difference between timepoint 1 and timepoint 2}
+\begin{itemize}[leftmargin=2em]
+  \item Timepoint 1: in \texttt{expo/v1/v1.func.R}, \texttt{exp.by.cat()} starts from \texttt{gen.beh.seq(k.neighb, 7, 4, tot.dur)}, that is, compartment 7 and behavior 4 (sleeping).
+  \item Timepoint 2: in \texttt{expo/v1/v1.func2.R}, \texttt{exp.by.cat()} is overwritten to start from \texttt{gen.beh.seq(k.neighb, 8, 4, tot.dur)}; \texttt{gen.freq.seq()} is also replaced with an 8-compartment version.
+  \item However, the source-pathway dose formulas are still inherited entirely from \texttt{v1.func.R}, especially from \texttt{expos.by.state()} and its helper functions.
+\end{itemize}
+
+\section{Definition of Exposure State Variables}
+\subsection{Hand contamination state}
+The model maintains an internal vector \texttt{n.hand} of length 7, with the following order:
+\[
+(\text{mother},\ \text{other adult},\ \text{other child},\ \text{livestock},\ \text{fomite},\ \text{food},\ \text{soil}).
+\]
+This is not the original observed concentration. Instead, it is the current contamination load on the infant's hand, traced back to each source category.
+
+\subsection{Output columns at each state}
+\texttt{exp.by.cat()} generates 21 columns. In particular:
+\begin{itemize}[leftmargin=2em]
+  \item Columns 4--10 are hand-contamination states: \texttt{hand\_mother}, \texttt{hand\_other adult}, \dots, \texttt{hand\_soil}.
+  \item Columns 11--21 are ingestion variables: \texttt{ingest\_mother}, \texttt{ingest\_other adult}, \texttt{ingest\_other child}, \texttt{ingest\_livestock}, \texttt{ingest\_fomite}, \texttt{ingest\_food}, \texttt{ingest\_soil}, \texttt{ingest\_bathing water}, \texttt{ingest\_drinking water}, \texttt{ingest\_breast milk}, \texttt{ingest\_areola surface}.
+\end{itemize}
+
+\paragraph{A key modeling feature}
+Although \texttt{expos.by.state(k.neighb, k.age, k.comp, k.behav, n.hand)} receives \texttt{k.comp} as an argument, the function body does not actually use it. So:
+\begin{quote}
+the current compartment affects exposure only indirectly through the frequency and timing of behaviors; it does not directly change any source-specific transfer formula.
+\end{quote}
+
+\section{Generic Transfer Mechanisms}
+\subsection{Core state-update function: \texttt{next.state()}}
+Most hand-surface, hand-food, hand-soil, and hand-mouth transfer calculations eventually reduce to \texttt{next.state(num.vec, p.vec)}. For source \(i\):
+\begin{align*}
+A_i &\sim \text{Binomial}(S_i, p_{\text{att}}), \\
+D_i &\sim \text{Binomial}(H_i, p_{\text{det}}), \\
+S_i' &= S_i - A_i + D_i, \\
+H_i' &= H_i + A_i - D_i.
+\end{align*}
+Here:
+\begin{itemize}[leftmargin=2em]
+  \item \(S_i\) is the source-side transferable load;
+  \item \(H_i\) is the current hand-side load;
+  \item \(p_{\text{att}}\) is the source-to-hand attachment/transfer probability;
+  \item \(p_{\text{det}}\) is the hand-to-source detachment/removal probability, or a removal probability during washing.
+\end{itemize}
+
+If the load is extremely large (\(>10^8\)), the code uses deterministic approximations, \(\text{round}(S_i p_{\text{att}})\) and \(\text{round}(H_i p_{\text{det}})\), instead of binomial sampling.
+
+\subsection{Generic probability distributions}
+\begin{itemize}[leftmargin=2em]
+  \item Hand-surface attachment: \(\texttt{att.floor.hand()} \sim \mathrm{Triangle}(0.01, 0.19, 0.10)\).
+  \item Hand-surface detachment: \(\texttt{det.floor.hand()} \sim \mathrm{Triangle}(0.25, 0.75, 0.50)\).
+  \item Hand-mouth transfer coefficient: \(\texttt{det.bact.hand.mouth()} \sim \mathrm{Triangle}(0.01, 0.40, 0.33)\).
+  \item Fraction of the hand placed in the mouth: \(\texttt{fraction.hand.in.mouth()} \sim \mathrm{Beta}(3.7, 25) / 2\).
+\end{itemize}
+
+\subsection{Infant hand area and contact area}
+\begin{itemize}[leftmargin=2em]
+  \item For 6-month infants (\texttt{k.age == 1}): \(\texttt{area.palm()} = 15.75\ \mathrm{cm}^2\).
+  \item For 12-month infants (\texttt{k.age == 2}): \(\texttt{area.palm()} = 29.25\ \mathrm{cm}^2\).
+  \item Infant hand contact area per event: \(\texttt{area.hand()} \sim \mathrm{Uniform}(1, \texttt{area.palm(age)})\).
+  \item Adult hand area: \(\texttt{area.adult.hand()} = \exp(\mathrm{TruncNormal}(5, 0.5; 4, 6))\).
+\end{itemize}
+
+\section{Pathway Calculation for Each Environmental Source}
+\subsection{Summary table}
+\begin{longtable}{p{1.2cm}p{2.5cm}p{3.4cm}p{6.8cm}}
+\toprule
+Code & Source & Triggering behavior & Actual dose/pathway calculation \\
+\midrule
+\endfirsthead
+\toprule
+Code & Source & Triggering behavior & Actual dose/pathway calculation \\
+\midrule
+\endhead
+EB & bathing water & \texttt{bathing} & Direct ingestion: \(\texttt{volume.bathing.water(age)} \times \texttt{sample(conc\$`bathing water`, 1)}\), written to \texttt{ingest\_bathing water}. At the same time, \texttt{hand.bathe()} removes contamination currently on the hand. \\
+ED & drinking water & \texttt{drinking} when the breastmilk branch is not chosen & Direct ingestion: \(\texttt{volume.dw(age)} \times \texttt{sample(conc\$`drinking water`, 1)}\), written to \texttt{ingest\_drinking water}. \\
+EF & food & \texttt{Eating-injera}, \texttt{Eating-other}, \texttt{Eating-raw plant} & First sets \(\texttt{num.food} = \texttt{sample(conc\$food, 1)} \times 50\) using a fixed 50 g serving, then calls \texttt{hand.food.contact()} to perform bidirectional transfer between food and the infant hand; the post-transfer \texttt{n.food} is treated as the ingested amount and written to \texttt{ingest\_food}. \\
+ES & soil & \texttt{Pica-soil} & First sets \(\texttt{num.soil} = \texttt{sample(conc\$soil, 1)}/50 \times 1.25\), matching the code comment that one soil swab represents 50 g soil and one pica event ingests 1.25 g. Then \texttt{hand.soil.contact()} performs bidirectional transfer with the current hand state, and the post-transfer \texttt{n.soil} is written to \texttt{ingest\_soil}. \\
+EV & fomite & \texttt{Touching-fomite}, \texttt{Mouthing-fomite}, and downstream \texttt{Mouthing-baby hand} & Touching pathway: \texttt{conc\$fomite/100} is treated as per-\(\mathrm{cm}^2\) load, assuming a 100 \(\mathrm{cm}^2\) swab area, and then transferred to the infant hand via \texttt{hand.surface()}. Mouthing pathway: \texttt{fomite.mouth()} uses \(\texttt{det.bact.hand.mouth()} \times \texttt{fomite.area.in.mouth()}/100\) for direct entry to the mouth. Indirect pathway: the fomite first contaminates the infant hand, then later enters the mouth through \texttt{Mouthing-baby hand}. \\
+HA & areola swab & \texttt{drinking} when the breastmilk branch is chosen & Direct ingestion: \(\texttt{sample(conc\$`areola swab`, 1)}\), written to \texttt{ingest\_areola surface}. The code does not multiply this by an additional contact area or suckling area. \\
+HB & breastmilk & \texttt{drinking} when the breastmilk branch is chosen & Direct ingestion: \(\texttt{volume.bm(age)} \times \texttt{sample(conc\$breastmilk, 1)}\), written to \texttt{ingest\_breast milk}. \\
+HH & sibling handrinse & \texttt{Touching-child hand}, \texttt{Mouthing-child hand}, and downstream \texttt{Mouthing-baby hand} & Touching pathway: \texttt{conc\$`sibling handrinse`/171.3} is converted to per-\(\mathrm{cm}^2\) load, where 171.3 is the area of a pair of child hands, and then transferred via \texttt{hand.surface()}. Direct mouthing pathway: \texttt{hand.mouth(c(0,0,raw child hand load,0,0,0,0))}. Indirect pathway: sibling-hand contamination first moves to the infant hand and later reaches the mouth through \texttt{Mouthing-baby hand}. \\
+HP & mother handrinse & \texttt{Touching-mom hand}, \texttt{Mouthing-mom hand}, \texttt{Touching-other adult hand}, \texttt{Mouthing-other adult hand}, and downstream \texttt{Mouthing-baby hand} & Touching pathway: \texttt{conc\$`mother handrinse`/278.92} is converted to per-\(\mathrm{cm}^2\) load, where 278.92 is the area of a pair of adult hands, and then transferred to the infant hand via \texttt{hand.surface()}. Direct mouthing pathway: \texttt{hand.mouth()} is applied directly to the external adult-hand load. Indirect pathway: adult-hand contamination first reaches the infant hand and later enters the mouth through \texttt{Mouthing-baby hand}. \\
+HR & infant handrinse & No direct behavior call & There is no direct call to \texttt{conc\$`infant handrinse`} anywhere in the exposure calculation code. Infant hand contamination is represented dynamically by \texttt{n.hand}, not by directly drawing from the HR posterior. So in the current implementation, HR is not a direct exposure-driving source. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Detailed notes by source}
+\subsubsection*{EB: bathing water}
+The \texttt{bathing} event does two things:
+\begin{enumerate}[leftmargin=2em]
+  \item It calls \texttt{hand.bathe(n.hand)} to remove contamination currently on the infant hand.
+  \item It computes direct ingestion during bathing:
+  \[
+  \texttt{num.bathing.water} =
+  \mathrm{round}\left(
+  \texttt{volume.bathing.water(age)} \times
+  \texttt{sample(conc\$`bathing water`, 1)}
+  \right).
+  \]
+\end{enumerate}
+The bathing-water ingestion volume is:
+\begin{itemize}[leftmargin=2em]
+  \item age 1: \(\mathrm{Uniform}(0, 2.69)\) mL;
+  \item age 2: \(\mathrm{Uniform}(0, 1.37)\) mL.
+\end{itemize}
+
+\subsubsection*{ED, HB, HA: the drinking branch}
+The \texttt{drinking} behavior first chooses a breastmilk branch with an age-dependent probability:
+\[
+p_{\text{bm}} =
+\begin{cases}
+\mathrm{Beta}(1173, 247), & \text{if } age = 1,\\
+\mathrm{Beta}(868, 305), & \text{if } age = 2.
+\end{cases}
+\]
+Then:
+\begin{itemize}[leftmargin=2em]
+  \item If the breastmilk branch is chosen, the code produces both
+  \[
+  \texttt{ingest\_breast milk}
+  =
+  \mathrm{round}\bigl(\texttt{volume.bm(age)} \times \texttt{sample(conc\$breastmilk,1)}\bigr),
+  \]
+  and
+  \[
+  \texttt{ingest\_areola surface}
+  =
+  \mathrm{round}\bigl(\texttt{sample(conc\$`areola swab`,1)}\bigr).
+  \]
+  \item If the drinking-water branch is chosen, then
+  \[
+  \texttt{ingest\_drinking water}
+  =
+  \mathrm{round}\bigl(\texttt{volume.dw(age)} \times \texttt{sample(conc\$`drinking water`,1)}\bigr).
+  \]
+\end{itemize}
+
+\paragraph{Note}
+The code uses the same volume ranges for \texttt{volume.bm(age)} and \texttt{volume.dw(age)}:
+\begin{itemize}[leftmargin=2em]
+  \item age 1: \(\mathrm{Uniform}(32.7, 54.5)\) mL;
+  \item age 2: \(\mathrm{Uniform}(54.5, 68.125)\) mL.
+\end{itemize}
+
+\subsubsection*{HP, HH, EV: contamination first reaches the infant hand, then the mouth}
+These three sources all share a common indirect pathway: contamination first reaches the infant hand, and later reaches the mouth from the hand.
+
+\paragraph{Step 1: source-side contamination moves to the infant hand}
+Inside \texttt{hand.surface()}, the code first converts the source concentration to a transferable load for a single contact:
+\[
+N_{\text{surface}} \sim \mathrm{Poisson}(\texttt{conc\_per\_cm2} \times \texttt{adult hand area}),
+\]
+and then uses \texttt{next.state()} to transfer some of that load to the infant hand with:
+\begin{align*}
+p_{\text{att}} &\sim \mathrm{Triangle}(0.01, 0.19, 0.10),\\
+p_{\text{det}} &\sim \mathrm{Triangle}(0.25, 0.75, 0.50) \times \frac{\texttt{child hand area}}{\texttt{palm area(age)}}.
+\end{align*}
+
+\paragraph{Step 2: the infant hand enters the mouth}
+\texttt{Mouthing-baby hand} calls \texttt{hand.mouth(n.hand)}, where:
+\[
+p_{\text{hand}\to\text{mouth}}
+=
+\texttt{det.bact.hand.mouth()} \times \texttt{fraction.hand.in.mouth()}.
+\]
+In code:
+\begin{align*}
+\texttt{det.bact.hand.mouth()} &\sim \mathrm{Triangle}(0.01,0.40,0.33),\\
+\texttt{fraction.hand.in.mouth()} &\sim \mathrm{Beta}(3.7,25)/2.
+\end{align*}
+After this transfer, the ingested amount is written into the relevant source-specific ingestion component, such as \texttt{ingest\_mother}, \texttt{ingest\_other adult}, \texttt{ingest\_other child}, \texttt{ingest\_fomite}, \texttt{ingest\_food}, or \texttt{ingest\_soil}.
+
+\paragraph{Per-area normalization by source}
+\begin{itemize}[leftmargin=2em]
+  \item HP (mother hand): \(\texttt{conc\$`mother handrinse`} / 278.92\).
+  \item HH (sibling hand): \(\texttt{conc\$`sibling handrinse`} / 171.3\).
+  \item EV (fomite): \(\texttt{conc\$fomite} / 100\).
+\end{itemize}
+
+\subsubsection*{HP and HH also have direct mouthing pathways}
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{Mouthing-mom hand}: applies \texttt{hand.mouth()} directly to \texttt{round(sample(conc\$`mother handrinse`,1),0)}, producing \texttt{ingest\_mother}.
+  \item \texttt{Mouthing-other adult hand}: still uses \texttt{mother handrinse} in the code, but writes the result to \texttt{ingest\_other adult}.
+  \item \texttt{Mouthing-child hand}: applies \texttt{hand.mouth()} directly to \texttt{round(sample(conc\$`sibling handrinse`,1),0)}, producing \texttt{ingest\_other child}.
+\end{itemize}
+
+\subsubsection*{EV also has a direct fomite-mouthing pathway}
+\texttt{Mouthing-fomite} calls \texttt{fomite.mouth()}, where:
+\[
+p_{\text{fomite}\to\text{mouth}}
+=
+\texttt{det.bact.hand.mouth()} \times \frac{\texttt{fomite.area.in.mouth()}}{100},
+\]
+and
+\[
+\texttt{fomite.area.in.mouth()} \sim \mathrm{Uniform}(10, 50)\ \mathrm{cm}^2.
+\]
+The denominator 100 corresponds to the assumed 100 \(\mathrm{cm}^2\) fomite swab area.
+
+\subsubsection*{EF: food pathway}
+The three eating behaviors --- \texttt{Eating-injera}, \texttt{Eating-other}, and \texttt{Eating-raw plant} --- use exactly the same code:
+\[
+\texttt{num.food} = \mathrm{round}\bigl(\texttt{sample(conc\$food,1)} \times 50\bigr).
+\]
+After that, the model calls \texttt{hand.food.contact(n.hand, n.food)}. The logic is:
+\begin{enumerate}[leftmargin=2em]
+  \item Assume \texttt{hand.eat() == 1}, meaning all food is eaten by hand.
+  \item Apply the same hand-surface transfer mechanism between food and the infant hand.
+  \item Treat the post-transfer \texttt{n.food} as the food-associated dose ingested in that event, and write it to \texttt{ingest\_food}.
+\end{enumerate}
+
+\paragraph{Interpretation note}
+This implementation is not ``first eat all contaminated food, then separately account for hand ingestion.'' Instead, it behaves as:
+\begin{quote}
+first let food and hand exchange contamination once, then treat the post-transfer food load as the ingested amount.
+\end{quote}
+
+\subsubsection*{ES: soil pathway}
+\texttt{Pica-soil} is implemented similarly to food, but with a different starting load:
+\[
+\texttt{num.soil}
+=
+\mathrm{round}\bigl(\texttt{sample(conc\$soil,1)}/50 \times 1.25\bigr).
+\]
+The code comment interprets this as one soil swab representing 50 g soil, and one pica event ingesting 1.25 g. Then \texttt{hand.soil.contact()} performs a soil-hand exchange, and the post-transfer soil load is treated as \texttt{ingest\_soil}.
+
+\subsubsection*{HR: infant handrinse}
+Although \texttt{source\_map} includes HR, corresponding to \texttt{infant handrinse}, and although HR is modeled in the environmental concentration layer, the exposure code does not directly use it:
+\begin{itemize}[leftmargin=2em]
+  \item there is no direct call to \texttt{conc\$`infant handrinse`};
+  \item infant hand contamination is represented entirely by the dynamic state \texttt{n.hand};
+  \item therefore HR is not a direct source input to the current exposure engine.
+\end{itemize}
+So the most accurate statement is that HR exists in the environmental data layer, but it is not currently used to drive dose inside \texttt{v1.func.R}.
+
+\section{How Supporting Files Affect Exposure Results}
+\subsection{Raw concentration unit conversions: \texttt{env\_conc/code/env\_data.R}}
+This file does not define mouth-hand transfer, but it does define how each source is back-calculated from laboratory measurements:
+\begin{itemize}[leftmargin=2em]
+  \item bathing water / drinking water: per mL;
+  \item mother handrinse / child handrinse / sibling handrinse: per pair of hands;
+  \item areola swab: per swab;
+  \item fomite: per sponge / swab;
+  \item food: per g;
+  \item breastmilk: per mL;
+  \item soil: per surface, though the exposure code later converts this to a swab-to-mass assumption for pica.
+\end{itemize}
+
+\subsection{Aggregation: \texttt{expo/v1/v1.plot.R}}
+The total exposure aggregation is direct:
+\[
+\texttt{res.ingest[k.sim, ] = c(k.sim, colSums(expo[, 11:21], na.rm = TRUE))}.
+\]
+So for one Monte Carlo simulation, the total dose is just the time-sum of the state-level ingestion columns.
+
+\subsection{Network view: \texttt{expo/v1/v1.netgraph.R}}
+\texttt{v1.netgraph.R} reshapes those state-level increments into a source-hand-mouth network. For example:
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{Bathing Water -> Mouth} comes from \texttt{ingest\_bathing water};
+  \item \texttt{Mother -> Hand} comes from the increase in \texttt{hand\_mother};
+  \item \texttt{Hand -> Mouth} comes from the drop in \texttt{n.hand} during \texttt{Mouthing-baby hand};
+  \item \texttt{Food -> Mouth} and \texttt{Soil -> Mouth} come from \texttt{ingest\_food} and \texttt{ingest\_soil} after eating or pica events.
+\end{itemize}
+This file changes the representation, not the underlying dose formulas.
+
+\section{Important Code-Level Caveats}
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{There is no separate source for ``other adult'' hands.} \texttt{Touching-other adult hand} and \texttt{Mouthing-other adult hand} both reuse \texttt{mother handrinse} instead of a distinct adult-hand source.
+  \item \textbf{HR does not enter the exposure engine directly.} \texttt{infant handrinse} exists in the source map and in the environmental concentration models, but \texttt{v1.func.R} never uses it directly.
+  \item \textbf{The livestock pathway is effectively zero in the current implementation.} \texttt{Touching-livestock} is left as a placeholder and returns zeros, so \texttt{ingest\_livestock} does not receive a real dose contribution.
+  \item \textbf{Compartment does not enter the dose formula directly.} \texttt{k.comp} is passed into \texttt{expos.by.state()}, but it is not used in the function body; the compartment only affects behavior timing indirectly.
+  \item \textbf{Food and soil intake are controlled by fixed serving assumptions.} Food is fixed at 50 g per eating event, and soil is fixed at 1.25 g per pica event, rather than being sampled from event-specific quantities or durations.
+  \item \textbf{HA and HB may be filtered out in the main scripts.} \texttt{v1.main.R} and \texttt{v1.main2.R} currently include debug logic that removes sources with non-finite posterior parameters. If HA or HB are dropped there, the downstream \texttt{expos.by.state()} assumptions about areola and breastmilk become inconsistent with the actual \texttt{conc} object.
+  \item \textbf{The summary plotting script has a possible indexing inconsistency around HA.} In \texttt{v1.plot.R}, the comment says ``HA exploded'', but the row actually removed from the summary table looks more like \texttt{Breast Milk} than \texttt{Areola Surface}. That part deserves a separate code check.
+\end{enumerate}
+
+\section{One-Sentence Summary}
+At the code level, the EXCAM environmental exposure module works as follows:
+\begin{quote}
+it first generates a daily infant behavior sequence from the behavior-state model, and then maps environmental concentration samples into hand and mouth doses using fixed transfer and ingestion rules; direct ingestion mainly comes from bathing water, drinking water, breastmilk, areola, food, soil, and direct fomite mouthing, while indirect ingestion mainly comes from mother hands, other adult hands, sibling hands, and fomites that first contaminate the infant hand and then reach the mouth through hand-mouth contact.
+\end{quote}
+
+\end{document}

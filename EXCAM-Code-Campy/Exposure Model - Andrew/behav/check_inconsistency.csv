@@ -1,0 +1,37 @@
+hh_id,obs_id,start,end,category,item,item_simple,gap
+001,FAYO_001,2021/5/27 13:00,2021/5/27 13:33,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 13:33,2021/5/27 13:37,Compartment,carried-mom arms,carried-mom,NA
+001,FAYO_001,2021/5/27 13:37,2021/5/27 13:53,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 13:53,2021/5/27 14:01,Compartment,carried-mom arms,carried-mom,NA
+001,FAYO_001,2021/5/27 14:01,2021/5/27 15:08,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 15:08,2021/5/27 15:13,Compartment,carried-mom arms,carried-mom,NA
+001,FAYO_001,2021/5/27 15:13,2021/5/27 15:15,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 15:15,2021/5/27 15:16,Compartment,carried-mom arms,carried-mom,NA
+001,FAYO_001,2021/5/27 15:16,2021/5/27 15:22,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 15:22,2021/5/27 15:32,Compartment,carried-mom back,carried-mom,NA
+001,FAYO_001,2021/5/27 15:32,2021/5/27 15:33,Compartment,carried-mom arms,carried-mom,NA
+001,FAYO_001,2021/5/27 15:33,2021/5/27 16:16,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 16:16,2021/5/27 16:45,Compartment,carried-mom arms,carried-mom,NA
+001,FAYO_001,2021/5/27 16:45,2021/5/27 16:47,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 16:47,2021/5/27 16:54,Compartment,carried-mom arms,carried-mom,NA
+001,FAYO_001,2021/5/27 16:54,2021/5/27 17:41,Compartment,down-with barrier,down-with barrier,NA
+001,FAYO_001,2021/5/27 17:41,2021/5/27 18:00,Compartment,carried-mom arms,carried-mom,NA
+,,,,,,,
+001,FAYO_001,2021/5/27 13:00,2021/5/27 13:33,Activity,awake,awake,NA
+001,FAYO_001,2021/5/27 13:33,2021/5/27 13:36,Activity,drinking-breastmilk,drinking,NA
+001,FAYO_001,2021/5/27 13:53,2021/5/27 13:57,Activity,drinking-breastmilk,drinking,1025
+001,FAYO_001,2021/5/27 13:57,2021/5/27 15:01,Activity,sleeping,sleeping,NA
+001,FAYO_001,2021/5/27 15:01,2021/5/27 15:01,Activity,awake,awake,NA
+001,FAYO_001,2021/5/27 15:01,2021/5/27 15:04,Activity,drinking-breastmilk,drinking,NA
+001,FAYO_001,2021/5/27 15:09,2021/5/27 15:11,Activity,drinking-breastmilk,drinking,264
+001,FAYO_001,2021/5/27 15:13,2021/5/27 15:14,Activity,drinking-other,drinking,NA
+001,FAYO_001,2021/5/27 15:17,2021/5/27 15:20,Activity,drinking-breastmilk,drinking,NA
+001,FAYO_001,2021/5/27 15:32,2021/5/27 15:33,Activity,drinking-other,drinking,NA
+001,FAYO_001,2021/5/27 15:33,2021/5/27 15:36,Activity,drinking-breastmilk,drinking,NA
+001,FAYO_001,2021/5/27 15:45,2021/5/27 15:46,Activity,drinking-breastmilk,drinking,528
+001,FAYO_001,2021/5/27 16:56,2021/5/27 17:02,Activity,drinking-breastmilk,drinking,4181
+001,FAYO_001,2021/5/27 17:05,2021/5/27 17:06,Activity,drinking-breastmilk,drinking,170
+001,FAYO_001,2021/5/27 17:09,2021/5/27 17:11,Activity,drinking-breastmilk,drinking,164
+001,FAYO_001,2021/5/27 17:21,2021/5/27 17:23,Activity,drinking-breastmilk,drinking,612
+001,FAYO_001,2021/5/27 17:27,2021/5/27 17:31,Activity,drinking-breastmilk,drinking,268
+001,FAYO_001,2021/5/27 17:36,2021/5/27 17:37,Activity,drinking-breastmilk,drinking,266

@@ -1,0 +1,812 @@
+---
+title: "EXCAM Campylobacter qPCR analysis"
+author: "Arie Havelaar, Yang Yang"
+format: html
+echo: false
+bibliography: references.bib
+---
+
+## Introduction
+
+This script provides a descriptive analysis of qPCR data from the EXCAM project and fits censored distributions to the data for use in exposure analysis using Bayesian estimation in `Stan`. qPCR data are available with PMAxx treatment, representing DNA in viable cells and total DNA of *Campylobacter*, respectively. After many discussions with the lab team, we decided to only fit the viability qPCR data and not to compare them with direct PCR because there were too many differences in handling of the samples. Also, no samples were tested for total DNA from sources ED and ES. Even within the dataset for viability qPCR, there are differences in handling. One important reason is the difference in total DNA concentration between sample types, which necessitated pre-concentration of some samples. We have no information on the impact of these differences in sample handling on DNA concentrations in the final test samples so cannot account for these differences. As recoveries are by definition less than 100%, it is safe to assume that the DNA concentrations are underestimated more if more sample preparation steps are included.
+
+## Housekeeping
+
+```{r}
+#| output: false
+library(fda)
+library(tidyverse)
+library(ggpubr)
+library(gt)
+library(tidyverse)
+library(rstan)
+library(bayesplot)
+library(patchwork)
+library(survival)
+library(modelr)
+library(lpridge)
+library(extraDistr)
+
+#library(conflicted)
+#conflict_prefer("select", "dplyr")
+#conflicts_prefer(dplyr::filter)
+#conflicts_prefer(MASS::area)
+#conflicts_prefer(tidyr::complete)
+#conflicts_prefer(rstan::extract)
+#conflicts_prefer(fda::gait)
+
+# Stan options
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+```
+
+## Data
+
+Data are available as rds files after processing the original lab created Excel files using the script `20250812_data_processing.qmd`.
+
+```{r}
+df_via <- readRDS("data/df_via.rds") # Viable DNA
+```
+
+### Count proportion of censored observations
+
+Due to technical limitations in the qPCR test, a Limit of Detection (LOD) is defined as Ct \> 35. For soil samples, the LOD is defined as Ct \> 29. Samples with higher Ct values are considered censored. This does not necessarily mean they are "negative". Instead, the concentration of DNA was too low to measure reliably. For this reason, we avoid the concept of prevalence in the data analysis and prefer to fit censored distributions.
+
+```{r}
+# Number of samples by source, viable DNA
+df_via_n <- 
+  df_via |> 
+    group_by(source)  |> 
+      summarize(n())
+colnames(df_via_n) <- c("source", "n_via")
+
+# Number of censored samples by source, viable DNA
+df_via_cens <- 
+  df_via |> 
+    filter(censored == 1) |> 
+    group_by(source)  |> 
+      summarize(n())
+colnames(df_via_cens) <- c("source", "cens_via")
+
+# Join all data in one dataframe
+
+df_cens_count <- 
+df_via_n |> 
+  left_join(df_via_cens, by = "source")
+
+df_cens_count$prop_via <- with(df_cens_count, cens_via / n_via)
+
+lvl<- levels(df_via$source) # Levels for viability data
+
+df_samples <- data.frame(
+  source_code = lvl,
+  source_name = c("Bathing water", "Drinking water", "Food", "Soil",
+                  "Fomite", "Areola swab", "Breast milk",
+                  "Sibling hand rinse", "Mother hand rinse", "Infant hand rinse") 
+)
+
+df_samples$via <- df_via_n$n_via
+df_samples$cens_via <- df_via_cens$cens_via
+df_samples$prop_via <- round(with(df_cens_count, cens_via / n_via), 2)
+
+df_samples |> 
+  gt() |> 
+  cols_label(
+    source_code = "Source code",
+    source_name = "Source",
+    via = "Total samples",
+    cens_via = "Censored samples",
+    prop_via = "Proportion censored"
+  )
+```
+
+### Plot censoring by source and method
+
+```{r}
+#| warning: false
+
+# Prepare dataframe
+df_cens_plot <-  df_samples[, c(1, 4)]
+df_cens_plot <-df_cens_plot |> 
+      reshape2::melt()
+colnames(df_cens_plot) <- c("source", "DNA", "value")
+
+(df_cens_plot |> 
+  ggplot(aes(x = value, y = source)) +
+    geom_point(color = "#0072B2") +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_discrete(labels = c("EB" = "Bathing water",
+                                "ED" = "Drinking water",
+                                "EF" = "Food",
+                                "ES" = "Soil",
+                                "EV" = "Fomites",
+                                "HA" = "Areola swab",
+                                "HB" = "Breast milk",
+                                "HH" = "Sibling hand rinse",
+                                "HP" = "Mother hand rinse",
+                                "HR" =  "Infant hand rinse"),
+                    limits = rev) +
+    labs(x = "Proportion censored observations",
+         y = "Source") +
+    theme_light()
+)
+#ggsave("../manuscript/cens_plot.tiff")
+```
+
+## Fit censored normal distributions
+
+We fit censored distributions using the `rstan` package. The censored model is defined in the file `norm_cens_model.stan`.
+
+```{r}
+# Define the model
+norm_cens_model <- stan_model(file = "Stan/norm_cens_model.stan")
+t_cens_model <- stan_model(file = "Stan/t_cens_model.stan")
+laplace_cens_model <- stan_model(file = "Stan/Laplace_cens_model.stan")
+```
+
+### Source EB - bathing water
+
+`r round(df_samples[which(df_samples$source_code == "EB"), 5] * 100, 0)`% censored data.
+
+```{r}
+#| output: true
+#| warning: true
+
+extract_data<-function(source_name){
+   y <- df_via |> 
+     filter(source == source_name & !is.na(dna)) |> 
+     select(c(dna)) |> 
+     unlist()
+   lod <- df_via |> 
+     filter(source == source_name & !is.na(dna)) |> 
+     select(c(dna_lod)) |> 
+     unlist()
+   cen <- df_via |> 
+     filter(source == source_name & !is.na(dna)) |> 
+     select(c(censored)) |> 
+     unlist()
+   list(y=y, lod=lod, cen=cen, N = length(y))
+}
+
+data_tot_EB <- extract_data('EB')
+
+# Fit the model
+fit_tot_EB <- sampling(norm_cens_model, data = data_tot_EB, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_EB, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+  
+
+# check trace plot
+traceplot(fit_tot_EB, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_EB)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+
+# Empirical CDF
+get_empirical_cdf <- function(dat) {
+   data_cens <- data.frame(left=rep(NA, length(dat$y)), right=rep(NA, length(dat$y))) 
+   data_cens$left <- ifelse(dat$cen==1, NA, dat$y)
+   data_cens$right <- ifelse(dat$cen==1, dat$lod, dat$y)
+
+   Surv_obj <- Surv(time = data_cens$left,
+                 time2 = data_cens$right,
+                 type = "interval2")
+
+   fit_surv <- survfit(Surv_obj ~ 0)
+
+    data.frame(
+     x = fit_surv$time,
+     cdf  = 1 - fit_surv$surv,
+     sd = fit_surv$std.err)
+}
+
+empirical_cdf <- get_empirical_cdf(data_tot_EB)
+
+#locpol <-lpridge(empirical_cdf$x, empirical_cdf$cdf, bandwidth=floor(nrow(empirical_cdf)*0.50), deriv=0, n.out=100, x.out=seq(0, 7, length.out=100), order = 3, ridge = 0, weight = "epa")
+#smooth.emp_cdf<-data.frame(x=locpol$x.out, cdf=locpol$est) 
+#smooth.emp_cdf$cdf[which(smooth.emp_cdf$cdf<0)] <- 0
+#smooth.emp_cdf$cdf[which(smooth.emp_cdf$cdf>1)] <- 1
+#k<-nrow(smooth.emp_cdf)
+#y <- c(smooth.emp_cdf$cdf[1], smooth.emp_cdf$cdf[2:k] - smooth.emp_cdf$cdf[1:(k-1)])
+#y[y<0] <- 0
+#smooth.emp_cdf$cdf <- cumsum(y)
+
+# monotone-function smoothing
+monosmoothing <- function(emp)
+{
+   #wgt=1/(emp$sd**2)
+   norder <- 6
+   Lfdobj=2
+   lambda=10^(0.5)
+   rng <- range(emp$x)
+   ntime   <- length(emp$x)
+   nbasis <- ntime + norder - 2
+   wbasis <- create.bspline.basis(rng, nbasis, norder, emp$x)
+   cvec0 <- matrix(0,nbasis,1) #  starting values for coefficient
+   Wfd0  <- fd(cvec0, wbasis)
+   result <- smooth.monotone(empirical_cdf$x, empirical_cdf$cdf, fdPar(Wfd0, Lfdobj, lambda),     dbglev=0)
+   Wfd  <- result$Wfdobj
+   beta <- result$beta
+   #  Evaluate the fitted height curve over a fine mesh
+   x.new <- seq(0, 7, length.out=100)
+   y.new <- beta[1] + beta[2]*eval.monfd(x.new, Wfd)
+   y.new[y.new<0] <- 0
+   y.new[y.new>1] <- 1
+   data.frame(x=x.new, cdf=y.new) 
+}
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+  
+#plot(monosmooth.emp_cdf$x, monosmooth.emp_cdf$cdf, type='p', pch = 19, cex = 0.6)
+#lines(empirical_cdf$x, empirical_cdf$cdf, lty=2, lwd=2, col='red')
+
+empirical_quantile <- function(p, emp) {
+  sapply(p, function(pp) {
+                  idx <- which(emp$cdf >= pp)[1]
+                  emp$x[idx]
+            })
+}
+#p <- seq(0.01, 0.99, by = 0.01)
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+# Theoretical CDF
+post_sum <- summary(fit_tot_EB)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+#nu_hat <- post_sum["nu", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+#theoretical_q <- mu_hat + sigma_hat * qt(p, nu_hat) 
+#theoretical_q <- qlaplace(p, mu_hat, sigma_hat)
+#sum(abs(theoretical_q-empirical_q1))
+#sum(abs(theoretical_q-empirical_q2))
+#sum(abs(theoretical_q-empirical_q3))
+
+integral_trapz <- function(x, y) {
+  idx <- 2:length(x)
+  # The formula is the sum of areas of trapezoids: 0.5 * base_width * (height1 + height2)
+  return(as.double((x[idx] - x[idx-1]) %*% (y[idx] + y[idx-1])) / 2)
+}
+
+# check the mean calculated from smoothed empirical CDF
+integral_trapz(smooth.emp_cdf$x, 1-smooth.emp_cdf$cdf)
+
+
+# Plot empirical and theoretical CDF
+plot(theoretical_q, empirical_q2, xlim=c(0, 7),ylim=c(0, 7),
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+
+### Source ED - drinking water
+
+`r round(df_samples[which(df_samples$source_code == "ED"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+# Provide the data as a list
+data_tot_ED <- extract_data('ED')
+
+# Fit the model
+fit_tot_ED <- sampling(norm_cens_model, data = data_tot_ED, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_ED, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_ED, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_ED)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+
+empirical_cdf <- get_empirical_cdf(data_tot_ED)
+monosmooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf)
+empirical_q2 <- empirical_quantile(p, monosmooth.emp_cdf)
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_ED)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+# Plot empirical and theoretical CDF
+plot(theoretical_q, empirical_q2, xlim=c(0, 7),ylim=c(0, 7),
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+```
+
+### Source EF - food
+
+`r round(df_samples[which(df_samples$source_code == "EF"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+
+# Provide the data as a list
+data_tot_EF <- extract_data('EF')
+
+# Fit the model
+fit_tot_EF <- sampling(norm_cens_model, data = data_tot_EF, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_EF, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_EF, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_EF)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+
+empirical_cdf <- get_empirical_cdf(data_tot_EF)
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_EF)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+x.range <- y.range <- range(c(theoretical_q, empirical_q1, empirical_q2), na.rm=TRUE)
+plot(theoretical_q, empirical_q2, xlim=x.range, ylim=y.range,
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+
+### Source ES - soil
+
+`r round(df_samples[which(df_samples$source_code == "ES"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+# Provide the data as a list
+data_tot_ES <- extract_data('ES')
+
+# Fit the model
+fit_tot_ES <- sampling(norm_cens_model, data = data_tot_ES, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_ES, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_ES, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_ES)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+empirical_cdf <- get_empirical_cdf(data_tot_ES)
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_ES)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+x.range <- y.range <- range(c(theoretical_q, empirical_q1, empirical_q2), na.rm=TRUE)
+plot(theoretical_q, empirical_q2, xlim=x.range, ylim=y.range,
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+
+### Source EV - fomites
+
+`r round(df_samples[which(df_samples$source_code == "EV"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+# Provide the data as a list
+data_tot_EV <- extract_data('EV')
+
+# Fit the model
+fit_tot_EV <- sampling(norm_cens_model, data = data_tot_EV, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_EV, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_EV, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_EV)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+empirical_cdf <- get_empirical_cdf(data_tot_EV)
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_EV)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+x.range <- y.range <- range(c(theoretical_q, empirical_q1, empirical_q2), na.rm=TRUE)
+plot(theoretical_q, empirical_q2, xlim=x.range, ylim=y.range,
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+
+### Source HA - areola swab
+
+`r round(df_samples[which(df_samples$source_code == "HA"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+# Provide the data as a list
+data_tot_HA <- extract_data('HA')
+
+# Fit the model
+fit_tot_HA <- sampling(norm_cens_model, data = data_tot_HA, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_HA, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_HA, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_HA)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+empirical_cdf <- get_empirical_cdf(data_tot_HA)
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_HA)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+x.range <- y.range <- range(c(theoretical_q, empirical_q1, empirical_q2), na.rm=TRUE)
+plot(theoretical_q, empirical_q2, xlim=x.range, ylim=y.range,
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+
+### Source HB - breast milk
+
+`r round(df_samples[which(df_samples$source_code == "HB"), 5] * 100, 0)`% censored data, so no data for fitting
+
+### Source HH - Sibling hand rinse
+
+`r round(df_samples[which(df_samples$source_code == "HH"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+
+# Provide the data as a list
+data_tot_HH <- extract_data('HH')
+
+# Fit the model
+fit_tot_HH <- sampling(norm_cens_model, data = data_tot_HH, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_HH, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_HH, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_HH)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+empirical_cdf <- get_empirical_cdf(data_tot_HH)
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_HH)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+x.range <- y.range <- range(c(theoretical_q, empirical_q1, empirical_q2), na.rm=TRUE)
+plot(theoretical_q, empirical_q2, xlim=x.range, ylim=y.range,
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+### Source HP - mother hand rinse
+
+`r round(df_samples[which(df_samples$source_code == "HP"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+# Provide the data as a list
+data_tot_HP <- extract_data('HP')
+
+# Fit the model
+fit_tot_HP <- sampling(norm_cens_model, data = data_tot_HP, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_HP, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_HP, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_HP)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+empirical_cdf <- get_empirical_cdf(data_tot_HP)
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_HP)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+x.range <- y.range <- range(c(theoretical_q, empirical_q1, empirical_q2), na.rm=TRUE)
+plot(theoretical_q, empirical_q2, xlim=x.range, ylim=y.range,
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+
+### Source HR - infant hand rinse
+
+`r round(df_samples[which(df_samples$source_code == "HR"), 5] * 100, 0)`% censored data.
+
+```{r}
+
+#| warning: true
+
+# Provide the data as a list
+data_tot_HR <- extract_data('HR')
+
+# Fit the model
+fit_tot_HR <- sampling(norm_cens_model, data = data_tot_HR, chains = 4, 
+                iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+summary(fit_tot_HR, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+  as.data.frame() |> 
+  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+  gt()
+
+# check trace plot
+traceplot(fit_tot_HR, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+posterior <- as.array(fit_tot_HR)
+color_scheme_set("brightblue")
+p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+p1 + p2
+
+empirical_cdf <- get_empirical_cdf(data_tot_HR)
+smooth.emp_cdf<-monosmoothing(empirical_cdf)
+
+p <- empirical_cdf$cdf[empirical_cdf$cdf > 0 & empirical_cdf$cdf < 1]
+empirical_q1 <- empirical_quantile(p, empirical_cdf) # non-smoothed empirical quantiles
+empirical_q2 <- empirical_quantile(p, smooth.emp_cdf) # smoothed empirical quantiles
+
+# Theoretical CDF
+post_sum <- summary(fit_tot_HR)$summary
+mu_hat <- post_sum["mu", "50%"]
+sigma_hat <- post_sum["sigma", "50%"]
+#nu_hat <- post_sum["nu", "50%"]
+#theoretical_q <- mu_hat + sigma_hat * qt(p, nu_hat) 
+theoretical_q <- qnorm(p, mu_hat, sigma_hat)
+
+x.range <- y.range <- range(c(theoretical_q, empirical_q1, empirical_q2), na.rm=TRUE)
+plot(theoretical_q, empirical_q2, xlim=x.range, ylim=y.range,
+     xlab = "Theoretical quantiles",
+     ylab = "Sample quantiles",
+     main = "Q-Q plot",
+     pch = 19, cex = 0.8)
+points(theoretical_q, empirical_q1, pch=21, cex=0.8, col='green')
+abline(0, 1, col = "red", lty=2, lwd = 1)
+legend('topleft', c('Non-smoothed', 'Smoothed'), pch=c(19,21), col=c('black','green'))
+
+```
+
+## Fit all distributions in one model with sample type as covariate
+
+Based on results of single fits, data for food, fomites and areola swabs will be excluded because of a high percentage censoring.
+
+```{r}
+df_via_f <- df_via |> 
+  filter(!source  %in% c("EF", "EV", "HB")) |> 
+  droplevels()
+```
+
+Stan requires explicit dummy variables, the design matrix can be created with `modelr::model_matrix()`.
+
+```{r}
+X <- select(df_via_f,
+       source, dna, dna_lod,censored) |> 
+  na.omit() |> # Drop incomplete cases
+  model_matrix(~ source) |>
+    as.matrix()
+```
+
+Fit multivariate model to filtered data
+
+```{r}
+
+#| warning: true
+
+#y <- df_via_f |> 
+#  select(c(dna)) |> 
+#  unlist()
+#lod <- df_via |> 
+#  select(c(dna_lod)) |> 
+#  unlist()
+#cen <- df_via |> 
+#  select(c(censored)) |> 
+#  unlist()
+
+
+# Provide the data as a list
+#data_via_all <- list(y=y, lod=lod, cen=cen, N = length(y))
+
+# Fit the model
+#fit_via_all <- sampling(norm_cens_model, data = data_via_all, chains = 4, 
+ #               iter = 2000, warmup = 1000)
+
+# Summarize posterior, including R_hat (Gelman-Rubin diagnostic)
+#summary(fit_via_all, pars = c("mu", "sigma"), probs = c(0.025, 0.5, 0.975))$summary |> 
+#  as.data.frame() |> 
+#  mutate(across(where(is.numeric), \(x) round(x, digits = 2))) |> 
+#  gt()
+
+# check trace plot
+#traceplot(fit_via_all, pars = c("mu", "sigma"), inc_warmup = FALSE)
+
+# Posterior Density Plots
+#posterior <- as.array(fit_via_all)
+#color_scheme_set("brightblue")
+#p1 <- mcmc_areas(posterior, pars = "mu", prob=0.9, area_method ="equal height")
+#p2 <- mcmc_areas(posterior, pars = "sigma", prob=0.9, area_method ="equal height")
+#p1 + p2
+```

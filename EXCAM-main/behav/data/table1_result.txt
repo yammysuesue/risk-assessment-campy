@@ -1,0 +1,22 @@
+metric	timepoint1	timepoint2
+# subjects	79	76
+mean age (range) in days	184 (132–263)	371 (338–466)
+duration of observation (hours)	698	608
+# duration-based activity transitions	3044	2517
+average % of time spent awake	63.8	77.1
+average % of time spent bathing	0.2	0.2
+average % of time spent drinking	14.2	10.5
+average % of time spent sleeping	21.8	12.1
+# frequency-based activities	23677	30801
+rate of eating (times per hour)	0.36	2.20
+rate of mouthing (times per hour)	13.27	10.68
+rate of pica (times per hour)	0.05	0.67
+rate of touching (times per hour)	20.28	37.08
+# compartment transitions	2753	3780
+average % of time spent carried by mother	40.3	26.0
+average % of time spent carried by other	14.5	6.9
+average % of time spent on the bare ground	0.2	16.5
+average % of time spent on a surface with barriers	45.0	50.5
+# location transitions	44	150
+average % of time spent out of homestead	0.4	2.2
+average % of time spent within homestead	99.6	97.8

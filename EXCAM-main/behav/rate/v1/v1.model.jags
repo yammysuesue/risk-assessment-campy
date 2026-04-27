@@ -1,0 +1,99 @@
+model {
+  C <- 1000
+  for(k.neighb in 1:n.neighb){
+    for(k.subj in 1:n.subj[k.neighb]){
+      # k.obs = 1: first observation...
+      for(k.comp in 1:n.comp){
+        for(k.behav in 1:n.behav){
+          llterm[k.neighb,k.subj,1,k.comp,k.behav] <-
+            lvec[k.neighb,
+                 k.comp,obs.comp[k.neighb,k.subj,1],
+                 k.behav,obs.behav[k.neighb,k.subj,1]]*
+            comp.mask[k.comp,k.behav]
+        }
+      }
+      phi[k.neighb,k.subj,1] <-
+        (obs.time[k.neighb,k.subj,1])^r *
+        (lvec[k.neighb,
+              obs.comp[k.neighb,k.subj,1],obs.comp[k.neighb,k.subj,1],
+              obs.behav[k.neighb,k.subj,1],obs.behav[k.neighb,k.subj,1]] -
+         sum(llterm[k.neighb,k.subj,1,,]))
+      # 1 < k.obs < K: rest of the observations...
+      for(k.obs in 2:(n.obs[k.neighb,k.subj]-1)){
+        for(k.comp in 1:n.comp){
+          for(k.behav in 1:n.behav){
+            llterm[k.neighb,k.subj,k.obs,k.comp,k.behav] <-
+              lvec[k.neighb,
+                   obs.comp[k.neighb,k.subj,1],k.comp,
+                   obs.behav[k.neighb,k.subj,k.obs-1],k.behav]*
+              comp.mask[k.comp,k.behav]
+          }
+        }
+        phi[k.neighb,k.subj,k.obs] <-
+          log(r) +
+          (r-1)*log(obs.time[k.neighb,k.subj,k.obs]) +
+          log(lvec[k.neighb,
+                   obs.comp[k.neighb,k.subj,k.obs-1],
+                   obs.comp[k.neighb,k.subj,k.obs],
+                   obs.behav[k.neighb,k.subj,k.obs-1],
+                   obs.behav[k.neighb,k.subj,k.obs]]) +
+          (obs.time[k.neighb,k.subj,k.obs])^r *
+          (lvec[k.neighb,
+             obs.comp[k.neighb,k.subj,k.obs-1],
+             obs.comp[k.neighb,k.subj,k.obs-1],
+             obs.behav[k.neighb,k.subj,k.obs-1],
+             obs.behav[k.neighb,k.subj,k.obs-1]] -
+           sum(llterm[k.neighb,k.subj,k.obs,,]))
+      }
+      # k.obs = K: last observation...
+      for(k.comp in 1:n.comp){
+        for(k.behav in 1:n.behav){
+          llterm[k.neighb,k.subj,n.obs[k.neighb,k.subj],k.comp,k.behav] <-
+            lvec[k.neighb,
+                 obs.comp[k.neighb,k.subj,n.obs[k.neighb,k.subj]],k.comp,
+                 obs.behav[k.neighb,k.subj,n.obs[k.neighb,k.subj]],k.behav]*
+            comp.mask[k.comp,k.behav]
+        }
+      }
+      phi[k.neighb,k.subj,n.obs[k.neighb,k.subj]] <-
+        (obs.time[k.neighb,k.subj,n.obs[k.neighb,k.subj]])^r *
+        (lvec[k.neighb,
+              obs.comp[k.neighb,k.subj,n.obs[k.neighb,k.subj]],
+              obs.comp[k.neighb,k.subj,n.obs[k.neighb,k.subj]],
+              obs.behav[k.neighb,k.subj,n.obs[k.neighb,k.subj]],
+              obs.behav[k.neighb,k.subj,n.obs[k.neighb,k.subj]]] -
+         sum(llterm[k.neighb,k.subj,n.obs[k.neighb,k.subj],,]))
+      for(k.obs in 1:n.obs[k.neighb,k.subj]){
+        zeros[k.neighb,k.subj,k.obs] ~ dpois(-phi[k.neighb,k.subj,k.obs]+C)
+      }
+    }
+  }
+  for(k.neighb in 1:n.neighb) {
+    for(k.oldcomp in 1:n.comp){
+      for(k.newcomp in 1:n.comp){
+        for(k.oldbehav in 1:n.behav){
+          for(k.newbehav in 1:n.behav){
+            mu.loglambda[k.neighb,
+                         k.oldcomp,k.newcomp,
+                         k.oldbehav,k.newbehav] ~
+              dnorm(mu0.loglambda,tau0.loglambda)
+            loglambda[k.neighb,
+                      k.oldcomp,k.newcomp,
+                      k.oldbehav,k.newbehav] ~
+              dnorm(mu.loglambda[k.neighb,
+                                 k.oldcomp,k.newcomp,
+                                 k.oldbehav,k.newbehav],
+                    tau.loglambda)
+            lvec[k.neighb,
+                 k.oldcomp,k.newcomp,
+                 k.oldbehav,k.newbehav] <-
+              exp(-loglambda[k.neighb,
+                             k.oldcomp,k.newcomp,
+                             k.oldbehav,k.newbehav]*r)
+          }
+        }
+      }
+    }
+  }
+  r <- exp(logr)
+}
